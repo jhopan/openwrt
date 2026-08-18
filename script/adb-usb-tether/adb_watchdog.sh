@@ -23,11 +23,10 @@ for serial in $connected; do
                 ;;
             *)
                 echo "$(date): Enabling RNDIS..." >> $LOG
-                # Fallback syntax command Android:
-                # 1. Android baru pakai setFunction
-                # 2. Android lama pakai setFunctions (pakai 's')
-                # 3. ROOT/System prop
-                adb -s "$serial" shell "svc usb setFunction rndis true || svc usb setFunctions rndis,adb || svc usb setFunctions rndis || setprop sys.usb.config rndis,adb" >> $LOG 2>&1
+                # Langsung pakai svc usb setFunctions rndis
+                # Perintah yang tidak sesuai akan memunculkan manual/usage tapi RNDIS tetap on jika ada yang berhasil.
+                adb -s "$serial" shell "svc usb setFunctions rndis" >> $LOG 2>&1
+                adb -s "$serial" shell "svc usb setFunction rndis true" >> $LOG 2>&1
                 sleep 7 # Tunggu HP re-connect sbg USB Network
                 ;;
         esac
