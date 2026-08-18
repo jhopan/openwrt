@@ -23,10 +23,22 @@ for serial in $connected; do
                 ;;
             *)
                 echo "$(date): Enabling RNDIS..." >> $LOG
-                # Langsung pakai svc usb setFunctions rndis
-                # Perintah yang tidak sesuai akan memunculkan manual/usage tapi RNDIS tetap on jika ada yang berhasil.
+                # Coba cara paling umum dulu: setFunctions rndis
                 adb -s "$serial" shell "svc usb setFunctions rndis" >> $LOG 2>&1
-                adb -s "$serial" shell "svc usb setFunction rndis true" >> $LOG 2>&1
+                
+                # Cek lagi state-nya, kalau masih gagal, pakai setFunction (tanpa s) untuk OS baru
+                sleep 2
+                check_func=$(adb -s "$serial" shell getprop sys.usb.config | tr -d '\r')
+                case "$check_func" in
+                    *rndis*)
+                        echo "$(date): Success via setFunctions" >> $LOG
+                        ;;
+                    *)
+                        echo "$(date): Retrying via setFunction..." >> $LOG
+                        adb -s "$serial" shell "svc usb setFunction rndis true" >> $LOG 2>&1
+                        ;;
+                esac
+                
                 sleep 7 # Tunggu HP re-connect sbg USB Network
                 ;;
         esac
