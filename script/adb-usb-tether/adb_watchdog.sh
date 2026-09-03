@@ -26,23 +26,28 @@ for serial in $connected; do
                 ;;
             *)
                 echo "$(date): Enabling RNDIS..." >> $LOG
-                # Coba cara paling umum dulu: setFunctions rndis,adb
-                adb -s "$serial" shell "svc usb setFunctions rndis,adb" >> $LOG 2>&1
 
-                # Cek lagi state-nya, kalau masih gagal, pakai setFunction (tanpa s) untuk OS baru
+                # Coba 1: setFunctions rndis,adb (Android baru)
+                adb -s "$serial" shell "svc usb setFunctions rndis,adb" >> $LOG 2>&1
                 sleep 2
                 check_func=$(adb -s "$serial" shell getprop sys.usb.config | tr -d '\r')
-                case "$check_func" in
-                    *rndis*)
-                        echo "$(date): Success via setFunctions" >> $LOG
-                        ;;
-                    *)
-                        echo "$(date): Retrying via setFunction..." >> $LOG
-                        adb -s "$serial" shell "svc usb setFunction rndis,adb true" >> $LOG 2>&1
-                        ;;
-                esac
+                if echo "$check_func" | grep -q "rndis"; then
+                    echo "$(date): Success via setFunctions" >> $LOG
+                else
+                    # Coba 2: setFunction rndis (Android lama)
+                    echo "$(date): Retrying via setFunction..." >> $LOG
+                    adb -s "$serial" shell "svc usb setFunction rndis" >> $LOG 2>&1
+                    sleep 2
+                    check_func2=$(adb -s "$serial" shell getprop sys.usb.config | tr -d '\r')
+                    if echo "$check_func2" | grep -q "rndis"; then
+                        echo "$(date): Success via setFunction" >> $LOG
+                    else
+                        # Semua gagal (misal Samsung block) — skip, lanjut rename interface
+                        echo "$(date): RNDIS commands failed (device may not support it via ADB), skipping setFunction" >> $LOG
+                    fi
+                fi
 
-                sleep 7 # Tunggu HP re-connect sbg USB Network
+                sleep 3
                 ;;
         esac
 
