@@ -1,21 +1,18 @@
 #!/bin/sh
-# === adb_watchdog.sh — menuadb watchdog v4 ===
-# Fix v4:
-#   - GRACE BOOT: 3 menit pertama setelah STB boot = NO reboot action
-#     (saat boot ADB belum tentu siap; dulu ini bikin false-positive
-#     "ADB OFFLINE" -> STB reboot padahal HP sehat)
-#   - MIN GAP antar increment: 3x hotplug event dalam 1 detik dulu
-#     dihitung 3 siklus -> ladder kepicu. Sekarang 1 increment per 50s.
-#   - ADB offline: coba restart adb server DULU sebelum increment.
+# === adb_watchdog.sh — menuadb watchdog v5 ===
+# ATATAN KERAS: JANGAN PERNAH reboot STB. Recovery = adb reboot HP saja.
+# Habis 3x reboot HP gagal -> menyerah + log, tunggu intervensi manual.
 #
 # Fitur:
 #   - flock guard (cron + hotplug ga bareng)
 #   - per-device flag: SERIAL=IFACE (rndis) atau SERIAL=IFACE:norndis
 #   - auto-detect device ADB online ga terdaftar -> naming-only (no rndis)
 #   - pipe-stall check: delta TX naik + RX diam
-#   - ladder STRICT: stall 3 siklus -> adb reboot HP (max 3x, jeda 3 menit)
-#     -> habis 3x -> STB reboot (flag persisten, max 1x)
-#   - ADB offline + kabel nancep 3 siklus -> STB reboot
+#   - ladder STRICT: stall 3 siklus -> adb reboot HP -> tunggu 3 menit ->
+#     cek lagi -> masih stall & adb konek -> reboot HP lagi, max 3x -> menyerah
+#   - ADB offline + kabel nancep -> restart adb server dulu; kalau tetap
+#     offline beruntun -> log menyerah (TIDAK ada aksi reboot apapun)
+#   - BOOT_GRACE 180s + MIN_GAP 50s: anti false-positive saat STB boot
 
 # Lock: hotplug + cron ga boleh bareng jalan.
 exec 9>/var/lock/adb_tether.lock
@@ -25,10 +22,9 @@ CONFIG="/etc/adb_tether.conf"
 AUTO_CONFIG="/etc/adb_tether_auto.conf"
 LOG="/var/log/adb_tether.log"
 STATE_DIR="/var/run/adb_tether"
-STB_FLAG="/etc/adb_tether_stb_rebooted"
 
 MAX_FAIL=3        # siklus (berjarak) sebelum mulai ladder
-HP_REBOOT_MAX=3   # max adb reboot HP sebelum STB reboot
+HP_REBOOT_MAX=3   # max adb reboot HP, habis itu MENYERAH
 HP_COOLDOWN=180   # tunggu 3 menit setelah adb reboot HP
 MIN_GAP=50        # minimal jarak antar increment counter (detik)
 BOOT_GRACE=180    # 3 menit pertama setelah STB boot: ga ada aksi reboot
@@ -61,7 +57,7 @@ get_state() { f="$STATE_DIR/$1_$2"; [ -f "$f" ] && cat "$f" || echo 0; }
 set_state() { echo "$3" > "$STATE_DIR/$1_$2"; }
 
 # bump_counter <nama> <serial> — increment HANYA jika >= MIN_GAP sejak
-# increment terakhir. Return 0 = increment terjadi, 1 = diabaikan (spam guard).
+# increment terakhir. Echo nilai baru jika increment, return 1 jika diabaikan.
 bump_counter() {
     name=$1; serial=$2
     last=$(get_state lastbump_$name "$serial")
@@ -84,30 +80,19 @@ sysfs_present() {
     return 1
 }
 
-stb_reboot() {
-    # LAST RESORT — STRICT: flag persisten, maksimal 1x.
-    if in_boot_grace; then
-        log "STB masih boot grace ($(uptime_s)s < ${BOOT_GRACE}s) — aksi reboot DITAHAN"
-        return 1
-    fi
-    if [ -f "$STB_FLAG" ]; then
-        log "STB reboot sudah pernah dicoba. Menyerah. (hapus $STB_FLAG untuk reset hak reboot)"
-        return 1
-    fi
-    log "LAST RESORT: reboot STB (flag persisten ditulis)"
-    touch "$STB_FLAG"
-    sync
-    reboot
-}
-
 recovery_ladder() {
     # $1=serial — stall terkonfirmasi (fail >= MAX_FAIL)
     serial=$1
     hprb=$(get_state hprb "$serial")
 
+    # Udah menyerah? Diem sampai pulih (cek_stall reset flag ini saat rx hidup)
+    if [ -f "$STATE_DIR/gaveup_$serial" ]; then
+        return
+    fi
+
     if [ "$hprb" -ge "$HP_REBOOT_MAX" ]; then
-        log "$serial: $HP_REBOOT_MAXx reboot HP gagal semua -> STB reboot"
-        stb_reboot
+        log "$serial: $HP_REBOOT_MAXx adb reboot HP GAGAL semua -> MENYERAH, butuh cek fisik (kabel/port/HP). STB TIDAK akan di-reboot."
+        touch "$STATE_DIR/gaveup_$serial"
         return
     fi
 
@@ -118,12 +103,12 @@ recovery_ladder() {
         if adb -s "$serial" reboot >> $LOG 2>&1; then
             set_cooldown "$serial" $HP_COOLDOWN
         else
-            log "$serial: adb reboot gagal -> langsung STB reboot"
-            stb_reboot
+            log "$serial: adb reboot gagal dikirim -> MENYERAH (STB TIDAK di-reboot)"
+            touch "$STATE_DIR/gaveup_$serial"
         fi
     else
-        log "$serial: ADB offline saat ladder -> langsung STB reboot"
-        stb_reboot
+        log "$serial: ADB ga konek saat ladder -> ga bisa adb reboot, MENYERAH (STB TIDAK di-reboot)"
+        touch "$STATE_DIR/gaveup_$serial"
     fi
 }
 
@@ -158,12 +143,12 @@ check_stall() {
     fi
 
     if [ "$DRX" -gt 0 ]; then
-        if [ "$(get_state hprb "$serial")" != "0" ] || [ "$(get_state fail "$serial")" != "0" ]; then
+        if [ "$(get_state hprb "$serial")" != "0" ] || [ "$(get_state fail "$serial")" != "0" ] || [ -f "$STATE_DIR/gaveup_$serial" ]; then
             log "$serial: pulih (rx hidup), ladder state direset"
         fi
         set_state fail "$serial" 0
         set_state hprb "$serial" 0
-        rm -f "$STB_FLAG"
+        rm -f "$STATE_DIR/gaveup_$serial"
         return
     fi
 
@@ -278,13 +263,13 @@ done < "$ALLDEV"
 
 # ---------- device terdaftar tapi ADB offline ----------
 # Kabel nancep (sysfs present) tapi adb ga online:
-#   1. coba restart adb server dulu (throttled) — sering cukup
-#   2. masih offline beruntun 3 siklus (berjarak) -> STB reboot
-#   3. kabel beneran dicabut -> diem
+#   1. coba restart adb server dulu (throttle 5 menit)
+#   2. tetap offline beruntun 3 siklus -> log menyerah. TITIK.
+#   (TIDAK ada adb reboot — adb offline ga bisa — dan TIDAK ada STB reboot)
 for line in $(cat "$ALLDEV" 2>/dev/null); do
     serial=${line%%=*}
     [ -z "$serial" ] && continue
-    echo "$connected" | grep -qw "$serial" && { set_state off "$serial" 0; continue; }
+    echo "$connected" | grep -qw "$serial" && { set_state off "$serial" 0; rm -f "$STATE_DIR/gaveup_off_$serial"; continue; }
     sysfs_present "$serial" || { set_state off "$serial" 0; continue; }
     in_cooldown "$serial" && continue
 
@@ -293,6 +278,9 @@ for line in $(cat "$ALLDEV" 2>/dev/null); do
         log "$serial: ADB belum online tapi STB baru boot ($(uptime_s)s) — nunggu, ga dihitung"
         continue
     fi
+
+    # Udah menyerah? Diem.
+    [ -f "$STATE_DIR/gaveup_off_$serial" ] && continue
 
     # Coba selamatkan dulu: restart adb server (throttle 5 menit)
     LASTKILL=$(get_state adbkill "$serial")
@@ -314,7 +302,7 @@ for line in $(cat "$ALLDEV" 2>/dev/null); do
     log "$serial: ADB OFFLINE padahal kabel nancep, off-fail $OFF/$MAX_FAIL"
 
     if [ "$OFF" -ge "$MAX_FAIL" ]; then
-        log "$serial: adb ga bisa dipakai -> STB reboot"
-        stb_reboot
+        log "$serial: ADB offline beruntun, adb reboot ga bisa. MENYERAH — butuh cek fisik (kabel/port/HP). STB TIDAK di-reboot."
+        touch "$STATE_DIR/gaveup_off_$serial"
     fi
 done
