@@ -94,24 +94,52 @@ for serial in $connected; do
         fi
     done
 
-    # === IP watchdog: tether stuck (RNDIS aktif tapi no IP) -> reboot HP via ADB ===
+    # === Pipe-stall watchdog: TX jalan tapi RX nol -> reboot HP ===
+    # Signature stall asli: STB kirim (tx naik, misal DHCP discover) tapi
+    # HP ga pernah balas (rx=0 permanen). Kalau tethering emang off,
+    # interface ga ada -> bukan stall, jangan reboot.
     if in_cooldown "$serial"; then
-        echo "$(date): $serial in cooldown (HP abis reboot), skip IP check" >> $LOG
+        echo "$(date): $serial in cooldown (HP abis reboot), skip stall check" >> $LOG
         continue
     fi
 
-    IP=$(ip -4 addr show "$target_iface" 2>/dev/null | grep -o 'inet [0-9.]*' | awk '{print $2}')
-    if [ -n "$IP" ]; then
-        [ "$(get_fail "$serial")" != "0" ] && echo "$(date): $serial IP recovered ($IP), fail counter cleared" >> $LOG
+    if [ ! -d "/sys/class/net/$target_iface" ]; then
+        # Interface ga ada (tethering off / mtp) -> bukan stall
         set_fail "$serial" 0
-    else
+        continue
+    fi
+
+    RX=$(cat /sys/class/net/$target_iface/statistics/rx_packets 2>/dev/null)
+    TX=$(cat /sys/class/net/$target_iface/statistics/tx_packets 2>/dev/null)
+    RX=${RX:-0}; TX=${TX:-0}
+
+    PREV_RX=0; PREV_TX=0
+    [ -f "$STATE_DIR/rx_$serial" ] && PREV_RX=$(cat "$STATE_DIR/rx_$serial")
+    [ -f "$STATE_DIR/tx_$serial" ] && PREV_TX=$(cat "$STATE_DIR/tx_$serial")
+    echo "$RX" > "$STATE_DIR/rx_$serial"
+    echo "$TX" > "$STATE_DIR/tx_$serial"
+
+    # Delta sejak siklus lalu (counter kumulatif, jadi pakai selisih)
+    DRX=$((RX - PREV_RX)); DTX=$((TX - PREV_TX))
+    # Counter reset (interface re-register) -> reset juga state delta
+    if [ "$DRX" -lt 0 ] || [ "$DTX" -lt 0 ]; then
+        DRX=0; DTX=0
+        set_fail "$serial" 0
+    fi
+
+    if [ "$DRX" -gt 0 ]; then
+        # Ada trafik balik dari HP -> sehat
+        [ "$(get_fail "$serial")" != "0" ] && echo "$(date): $serial RX hidup lagi, fail counter cleared" >> $LOG
+        set_fail "$serial" 0
+    elif [ "$DTX" -gt 0 ]; then
+        # STB kirim (tx naik) tapi HP ga pernah balas (rx diam) = pipe satu arah mati
         FAIL=$(get_fail "$serial")
         FAIL=$((FAIL + 1))
         set_fail "$serial" "$FAIL"
-        echo "$(date): $serial ($target_iface) NO IP, fail $FAIL/$MAX_FAIL" >> $LOG
+            echo "$(date): $serial ($target_iface) STALL: dtx=$DTX drx=0 (rx=$RX tx=$TX), fail $FAIL/$MAX_FAIL" >> $LOG
 
         if [ "$FAIL" -ge "$MAX_FAIL" ]; then
-            echo "$(date): Tether stuck -> REBOOTING $serial via adb" >> $LOG
+            echo "$(date): Pipe stall -> REBOOTING $serial via adb" >> $LOG
             if adb -s "$serial" reboot >> $LOG 2>&1; then
                 echo $(( $(date +%s) + COOLDOWN )) > "$STATE_DIR/cooldown_$serial"
                 set_fail "$serial" 0
@@ -121,5 +149,8 @@ for serial in $connected; do
                 set_fail "$serial" 0
             fi
         fi
+    else
+        # Idle total (ga ada traffic dua arah) -> jangan hitung
+        set_fail "$serial" 0
     fi
 done
