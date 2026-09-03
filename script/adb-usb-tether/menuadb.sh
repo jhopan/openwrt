@@ -32,9 +32,14 @@ while true; do
         2)
             read -p "Masukkan Serial Device: " sn
             read -p "Pilih interface tujuan (cth: usb0 / usb1): " iface
+            read -p "Auto ADB RNDIS? [y/n] (n = penamaan saja): " ans
+            case "$ans" in
+                [Nn]*) entry="$sn=$iface:norndis" ;;
+                *)   entry="$sn=$iface" ;;
+            esac
             grep -v "^$sn=" "$CONFIG" > "$CONFIG.tmp"; mv "$CONFIG.tmp" "$CONFIG"
-            echo "$sn=$iface" >> "$CONFIG"
-            echo "Tersimpan: $sn -> $iface"
+            echo "$entry" >> "$CONFIG"
+            echo "Tersimpan: $entry"
             ;;
         3)
             cat "$CONFIG"
