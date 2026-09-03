@@ -1,4 +1,8 @@
 #!/bin/sh
+# Lock: hotplug + cron ga boleh bareng jalan. Kalau lock udah dipegang (ada yang jalan), skip.
+exec 9>/var/lock/adb_tether.lock
+flock -n 9 || exit 0
+
 CONFIG="/etc/adb_tether.conf"
 LOG="/var/log/adb_tether.log"
 echo "$(date): Watchdog started" >> $LOG
@@ -12,20 +16,19 @@ for serial in $connected; do
     target_iface=$(grep "^$serial=" "$CONFIG" | cut -d'=' -f2)
     if [ -n "$target_iface" ]; then
         echo "$(date): Processing $serial -> $target_iface" >> $LOG
-        
-        # Check current RNDIS state
+
         current_func=$(adb -s "$serial" shell getprop sys.usb.config | tr -d '\r')
         echo "$(date): Current USB func for $serial is $current_func" >> $LOG
-        
+
         case "$current_func" in
             *rndis*)
                 echo "$(date): RNDIS already active" >> $LOG
                 ;;
             *)
                 echo "$(date): Enabling RNDIS..." >> $LOG
-                # Coba cara paling umum dulu: setFunctions rndis
-                adb -s "$serial" shell "svc usb setFunctions rndis" >> $LOG 2>&1
-                
+                # Coba cara paling umum dulu: setFunctions rndis,adb
+                adb -s "$serial" shell "svc usb setFunctions rndis,adb" >> $LOG 2>&1
+
                 # Cek lagi state-nya, kalau masih gagal, pakai setFunction (tanpa s) untuk OS baru
                 sleep 2
                 check_func=$(adb -s "$serial" shell getprop sys.usb.config | tr -d '\r')
@@ -35,14 +38,14 @@ for serial in $connected; do
                         ;;
                     *)
                         echo "$(date): Retrying via setFunction..." >> $LOG
-                        adb -s "$serial" shell "svc usb setFunction rndis true" >> $LOG 2>&1
+                        adb -s "$serial" shell "svc usb setFunction rndis,adb true" >> $LOG 2>&1
                         ;;
                 esac
-                
+
                 sleep 7 # Tunggu HP re-connect sbg USB Network
                 ;;
         esac
-        
+
         # Find and rename interface
         for usb_dir in /sys/bus/usb/devices/*; do
             if [ -f "$usb_dir/serial" ]; then
