@@ -1,0 +1,26 @@
+#!/bin/sh
+# 20-usb_mode: auto-switch Huawei HiLink ZeroCD -> NCM (wwan0 / ModemSabun)
+#
+# Gejala tanpa file ini: 12d1:14fe nyancep sebagai CD-ROM virtual + TF card,
+# huawei_cdc_ncm loaded tapi ga nge-bind, wwan0 ga pernah muncul.
+#
+# Loop-safe: rule usb-mode.json cuma match 14fe (CD-ROM). Hasil switch = 1506
+# (NCM) -> tak ada rule -> usbmode no-op. Event interface (1-1:1.x) juga aman.
+#
+# Tested on stb-jhopan, 2026-09-21: /sbin/usbmode -s switch 14fe -> wwan0
+# (192.168.8.100 via ModemSabun dhcp). icmp/literal-IP diblok Telkomsel (normal).
+
+[ "$ACTION" = "add" ] || exit 0
+[ -e /etc/usb-mode.json ] || exit 0
+
+# Cek: ada Huawei HiLink yang masih CD-ROM di bus?
+found=""
+for d in /sys/bus/usb/devices/*/idProduct; do
+	v=$(cat "${d%idProduct}idVendor" 2>/dev/null)
+	p=$(cat "$d" 2>/dev/null)
+	[ "$v" = "12d1" ] && [ "$p" = "14fe" ] && { found=1; break; }
+done
+[ -n "$found" ] || exit 0
+
+logger -t usb_mode "Huawei 12d1:14fe ZeroCD terdeteksi ($DEVICENAME), switch ke NCM"
+/sbin/usbmode -s
