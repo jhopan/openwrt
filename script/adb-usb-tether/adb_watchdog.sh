@@ -14,9 +14,17 @@
 #     offline beruntun -> log menyerah (TIDAK ada aksi reboot apapun)
 #   - BOOT_GRACE 180s + MIN_GAP 50s: anti false-positive saat STB boot
 
+# Start adb server sebelum lock dibuka agar daemon tidak mewarisi fd lock
+command adb start-server >/dev/null 2>&1
+
 # Lock: hotplug + cron ga boleh bareng jalan.
 exec 9>/var/lock/adb_tether.lock
 flock -n 9 || exit 0
+
+# Tutup fd 9 untuk semua pemanggilan adb agar daemon child ga pernah nahan lock
+adb() {
+    command adb "$@" 9>&-
+}
 
 CONFIG="/etc/adb_tether.conf"
 AUTO_CONFIG="/etc/adb_tether_auto.conf"
@@ -207,20 +215,31 @@ while IFS= read -r line; do
                 ;;
             *)
                 log "Enabling RNDIS..."
+                # Coba 1: setFunctions rndis,adb (Android baru/standar)
                 adb -s "$serial" shell "svc usb setFunctions rndis,adb" >> $LOG 2>&1
                 sleep 2
                 check_func=$(adb -s "$serial" shell getprop sys.usb.config | tr -d '\r')
                 if echo "$check_func" | grep -q "rndis"; then
-                    log "Success via setFunctions"
+                    log "Success via setFunctions rndis,adb"
                 else
-                    log "Retrying via setFunction..."
-                    adb -s "$serial" shell "svc usb setFunction rndis" >> $LOG 2>&1
+                    # Coba 2: setFunctions rndis (Android 10 ColorOS/MediaTek)
+                    log "Retrying via setFunctions rndis..."
+                    adb -s "$serial" shell "svc usb setFunctions rndis" >> $LOG 2>&1
                     sleep 2
                     check_func2=$(adb -s "$serial" shell getprop sys.usb.config | tr -d '\r')
                     if echo "$check_func2" | grep -q "rndis"; then
-                        log "Success via setFunction"
+                        log "Success via setFunctions rndis"
                     else
-                        log "RNDIS commands failed (device block?), skipping setFunction"
+                        # Coba 3: setFunction rndis (Android lama tanpa s)
+                        log "Retrying via setFunction..."
+                        adb -s "$serial" shell "svc usb setFunction rndis" >> $LOG 2>&1
+                        sleep 2
+                        check_func3=$(adb -s "$serial" shell getprop sys.usb.config | tr -d '\r')
+                        if echo "$check_func3" | grep -q "rndis"; then
+                            log "Success via setFunction"
+                        else
+                            log "RNDIS commands failed (device block?), skipping setFunction"
+                        fi
                     fi
                 fi
                 sleep 3
